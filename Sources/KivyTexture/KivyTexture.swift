@@ -37,16 +37,29 @@ private let kv_tex_funcs = {
 	return funcs
 }()
 
-func cgPixels(imageRef: CGImage) -> PyPointer? {
+
+extension UnsafeMutablePointer where Pointee == UInt8 {
+	
+	static func new(_ capacity: Int) -> Self {
+		let ptr = Self.allocate(capacity: capacity)
+		ptr.initialize(repeating: 0, count: capacity)
+		return ptr
+	}
+}
+
+func cgPixels(imageRef: CGImage) -> (UnsafeMutablePointer<UInt8>, Int) {
 
 	let wh = imageRef
 	let width = wh.width
 	let height = wh.height
 	let bytesPerRow = width * 4
+	
 	let size = bytesPerRow * height
 	var colorSpace = CGColorSpaceCreateDeviceRGB()
+	//var colorSpace: CGColorSpace = .init(name: CGColorSpace.sRGB)!
 	
-	let pixels = UnsafeMutablePointer<UInt8>.allocate(capacity: size)
+	//let pixels = PixelContainer(capacity: size)
+	let pixels = UnsafeMutablePointer<UInt8>.new(size)
 	let bounds = CGRect(x: 0, y: 0, width: width, height: height)
 	
 	let context = CGContext(
@@ -57,7 +70,7 @@ func cgPixels(imageRef: CGImage) -> PyPointer? {
 		bytesPerRow: bytesPerRow,
 		space: colorSpace,
 		bitmapInfo:
-			CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+			CGImageAlphaInfo.premultipliedLast.rawValue
 		
 	)!
 
@@ -69,20 +82,11 @@ func cgPixels(imageRef: CGImage) -> PyPointer? {
 	
 	context.fill(bounds)
 
-	var py_buffer = Py_buffer()
-	PyBuffer_FillInfo(
-		&py_buffer,
-		nil,
-		pixels,
-		size,
-		0,
-		PyBUF_WRITE
-	)
-	let mem_view = PyMemoryView_FromBuffer(&py_buffer)
-	PyBuffer_Release(&py_buffer)
 	
-	return mem_view
+	return (pixels, size)
 }
+
+
 
 public struct KivyTexture {
 	
@@ -93,7 +97,7 @@ public struct KivyTexture {
 	].pyPointer
 	static let blit_string = "blit_buffer".pyPointer
 	
-	let data: PyPointer
+	public let data: PyPointer
 	
 	public init(width: Int, height: Int) {
 		data = try! Self.texture_create([width, height])
@@ -107,10 +111,29 @@ public struct KivyTexture {
 			fatalError()
 		}
 		
-		let pixels = cgPixels(imageRef: cg)
-		PyObject_VectorcallMethod(Self.blit_string, [tex, pixels, .None, Self.rgba], 4, nil)
+		let (pixels, size) = cgPixels(imageRef: cg)
+		
+		var py_buffer = Py_buffer()
+		PyBuffer_FillInfo(
+			&py_buffer,
+			nil,
+			pixels,
+			size,
+			0,
+			PyBUF_WRITE
+		)
+		let mem_view = PyMemoryView_FromBuffer(&py_buffer)
+//		
+		//let mem_view = PyMemoryView_FromObject(pixels)
+		
+		
+		PyObject_VectorcallMethod(Self.blit_string, [tex, mem_view, .None, Self.rgba], 4, nil)
+		
 		tex_size.decref()
-		pixels?.decref()
+		//pixels.decref()
+		mem_view?.decref()
+		PyBuffer_Release(&py_buffer)
+		pixels.deallocate()
 		
 		data = tex
 	}
@@ -131,7 +154,7 @@ public struct KivyTexture {
 		
 	}
 	
-	static func create(pixels: PyPointer, width: Int, height: Int) -> PyPointer {
+	public static func create(pixels: PyPointer, width: Int, height: Int) -> PyPointer {
 		Self.init(pixels: pixels, width: width, height: height).data
 	}
 }
@@ -144,11 +167,12 @@ public protocol KivyTextureProtocol {
 
 extension CGImage: KivyTextureProtocol {
 	public func texture() -> PyPointer {
-		if let pixels = cgPixels(imageRef: self) {
-			let tex = KivyTexture(pixels: pixels, width: width, height: height).data
-			pixels.decref()
-			return tex
-		}
+		return KivyTexture(cg: self).data
+//		if let pixels = cgPixels(imageRef: self)?.pyPointer {
+//			let tex = KivyTexture(pixels: pixels, width: width, height: height).data
+//			pixels.decref()
+//			return tex
+//		}
 		
 		return .None
 	}
